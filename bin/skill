@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Kill running processes whose name matches one or more target names."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import signal
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class ProcessEntry:
+    pid: int
+    comm: str
+    args: str
+
+    @property
+    def executable_name(self) -> str:
+        return Path(self.comm).name
+
+    @property
+    def arg0_name(self) -> str:
+        if not self.args:
+            return ""
+        return Path(self.args.split()[0]).name
+
+
+def parse_signal(value: str) -> int:
+    raw = value.strip()
+    if not raw:
+        raise argparse.ArgumentTypeError("signal value cannot be empty")
+
+    if raw.isdigit():
+        signal_number = int(raw)
+        if signal_number < 0:
+            raise argparse.ArgumentTypeError(
+                f"invalid signal number '{value}': must be >= 0"
+            )
+        return signal_number
+
+    upper = raw.upper()
+    candidates = [upper]
+    if not upper.startswith("SIG"):
+        candidates.append(f"SIG{upper}")
+
+    for candidate in candidates:
+        signal_value = getattr(signal, candidate, None)
+        if signal_value is None:
+            continue
+        try:
+            return int(signal.Signals(signal_value))
+        except ValueError:
+            continue
+
+    raise argparse.ArgumentTypeError(
+        f"unknown signal '{value}' (examples: TERM, KILL, HUP, 9)"
+    )
+
+
+def describe_signal(signal_number: int) -> str:
+    try:
+        signal_enum = signal.Signals(signal_number)
+        return f"{signal_enum.name} ({signal_number})"
+    except ValueError:
+        return str(signal_number)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Kill processes whose name exactly matches one or more provided names."
+        )
+    )
+    parser.add_argument(
+        "names",
+        nargs="+",
+        help="Process names to match exactly (for example: python3 node my-tool).",
+    )
+    parser.add_argument(
+        "-i",
+        "--ignore-case",
+        action="store_true",
+        help="Match process names case-insensitively.",
+    )
+    parser.add_argument(
+        "-s",
+        "--signal",
+        type=parse_signal,
+        default=parse_signal("TERM"),
+        metavar="SIGNAL",
+        help=(
+            "Signal to send (name or number). "
+            "Examples: TERM, KILL, HUP, USR1, 9. Default: TERM."
+        ),
+    )
+    parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt and execute the kill operation immediately.",
+    )
+    return parser
+
+
+def normalize_name(name: str, ignore_case: bool) -> str:
+    return name.casefold() if ignore_case else name
+
+
+def list_processes() -> list[ProcessEntry]:
+    try:
+        output = subprocess.check_output(
+            ["ps", "-axo", "pid=,comm=,args="],
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(f"Unable to read process table: {exc}") from exc
+
+    processes: list[ProcessEntry] = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parts = stripped.split(None, 2)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        comm = parts[1]
+        args = parts[2] if len(parts) == 3 else parts[1]
+        processes.append(ProcessEntry(pid=pid, comm=comm, args=args))
+    return processes
+
+
+def find_matching_processes(
+    processes: list[ProcessEntry], names: list[str], ignore_case: bool
+) -> list[ProcessEntry]:
+    normalized_targets = {normalize_name(name, ignore_case) for name in names}
+    current_pid = os.getpid()
+    matches: list[ProcessEntry] = []
+
+    for process in processes:
+        if process.pid == current_pid:
+            continue
+        candidates = {
+            normalize_name(process.comm, ignore_case),
+            normalize_name(process.executable_name, ignore_case),
+            normalize_name(process.arg0_name, ignore_case),
+        }
+        if normalized_targets.intersection(candidates):
+            matches.append(process)
+
+    matches.sort(key=lambda item: item.pid)
+    return matches
+
+
+def print_matches(processes: list[ProcessEntry]) -> None:
+    print(f"Matched {len(processes)} process(es):")
+    for process in processes:
+        print(
+            f"  - pid={process.pid} name={process.executable_name} command={process.args}"
+        )
+
+
+def confirm_or_exit(skip_prompt: bool, signal_number: int) -> bool:
+    if skip_prompt:
+        return True
+
+    response = (
+        input(f"Send {describe_signal(signal_number)} to processes listed above? [y/N]: ")
+        .strip()
+        .lower()
+    )
+    return response in {"y", "yes"}
+
+
+def kill_processes(
+    processes: list[ProcessEntry], signal_number: int
+) -> tuple[list[ProcessEntry], list[str]]:
+    killed: list[ProcessEntry] = []
+    failures: list[str] = []
+
+    for process in processes:
+        try:
+            os.kill(process.pid, signal_number)
+            killed.append(process)
+        except ProcessLookupError:
+            failures.append(f"pid={process.pid} no longer exists.")
+        except PermissionError:
+            failures.append(f"pid={process.pid} permission denied.")
+        except OSError as exc:
+            failures.append(f"pid={process.pid} failed with error: {exc}.")
+
+    return killed, failures
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    try:
+        processes = list_processes()
+    except RuntimeError as exc:
+        print(exc)
+        return 1
+
+    matches = find_matching_processes(
+        processes=processes,
+        names=args.names,
+        ignore_case=args.ignore_case,
+    )
+
+    if not matches:
+        print("No matching processes found.")
+        return 0
+
+    print_matches(matches)
+    if not confirm_or_exit(skip_prompt=args.yes, signal_number=args.signal):
+        print("Kill operation cancelled.")
+        return 1
+
+    killed, failures = kill_processes(matches, signal_number=args.signal)
+    print(f"Sent {describe_signal(args.signal)} to {len(killed)} process(es).")
+    if failures:
+        print("Some processes could not be terminated:")
+        for failure in failures:
+            print(f"  - {failure}")
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
