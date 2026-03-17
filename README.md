@@ -54,26 +54,26 @@ bash scripts/bash/<script-name>.sh
 Install all user-facing scripts from this repo's `bin/` into `${HOME}/bin`:
 
 ```sh
-python3 install-helper-scripts.py
+python3 install.py
 ```
 
 Use a custom install directory:
 
 ```sh
-python3 install-helper-scripts.py --install-dir /path/to/bin
+python3 install.py --install-dir /path/to/bin
 ```
 
 Install symlinks instead of copied files (recommended if you want repo updates
 to be immediately reflected in installed tools):
 
 ```sh
-python3 install-helper-scripts.py --symlink
+python3 install.py --symlink
 ```
 
 Skip all prompts (including overwrite confirmation):
 
 ```sh
-python3 install-helper-scripts.py -y
+python3 install.py -y
 ```
 
 When the install directory is not already on `PATH`, the installer detects your
