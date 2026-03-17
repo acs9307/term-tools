@@ -70,6 +70,23 @@ class FindMatchingProcessesTest(unittest.TestCase):
 
         self.assertEqual([process.pid for process in matches], [102])
 
+    def test_exact_match_on_raw_relative_arg0_is_included(self) -> None:
+        processes = [
+            smart_kill.ProcessEntry(
+                pid=108,
+                comm="core-service",
+                args="./core-service --watch",
+            )
+        ]
+
+        matches = smart_kill.find_matching_processes(
+            processes=processes,
+            names=["./core-service"],
+            ignore_case=False,
+        )
+
+        self.assertEqual([process.pid for process in matches], [108])
+
     def test_ignore_case_applies_to_partial_matches(self) -> None:
         processes = [
             smart_kill.ProcessEntry(

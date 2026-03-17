@@ -49,6 +49,12 @@ class ProcessEntry:
         return Path(self.argv[0]).name
 
     @property
+    def raw_arg0(self) -> str:
+        if not self.argv:
+            return ""
+        return self.argv[0]
+
+    @property
     def argument_tokens(self) -> tuple[str, ...]:
         if self.args.startswith(self.comm):
             remainder = self.args[len(self.comm) :].strip()
@@ -231,9 +237,11 @@ def find_matching_processes(
         executable_exact_candidates = {
             normalize_name(process.comm, ignore_case),
             normalize_name(process.executable_name, ignore_case),
+            normalize_name(process.raw_arg0, ignore_case),
             normalize_name(process.arg0_name, ignore_case),
         }
         executable_partial_candidates = {
+            normalize_name(process.raw_arg0, ignore_case),
             normalize_name(process.executable_name, ignore_case),
             normalize_name(process.arg0_name, ignore_case),
         }
