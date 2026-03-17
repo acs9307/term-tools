@@ -89,21 +89,30 @@ with `-y`).
 
 ## Included user-facing tools
 
-`skill` ("smart kill"):
+`smart-kill`:
 
 ```sh
-# Case-sensitive match (default), prompts before kill
-skill process-name another-name
+# Case-sensitive exact or partial match across executables and arguments
+smart-kill process-name another-name
 
-# Case-insensitive matching
-skill -i process-name
+# Case-insensitive exact or partial matching
+smart-kill -i process-name
+
+# Search only executable names
+smart-kill --match-scope executables chrome
+
+# Search only process arguments
+smart-kill --match-scope arguments devbox.local
+
+# When the search term starts with -, stop option parsing first
+smart-kill --match-scope arguments -- --watch
 
 # Send a specific signal (name or number)
-skill -s KILL process-name
-skill -s 9 process-name
+smart-kill -s KILL process-name
+smart-kill -s 9 process-name
 
 # Skip confirmation prompt
-skill -y process-name
+smart-kill -y process-name
 ```
 
 ## Adding a new script

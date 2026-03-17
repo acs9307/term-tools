@@ -5,11 +5,22 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import signal
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
+
+MATCH_SCOPE_ALL = "all"
+MATCH_SCOPE_EXECUTABLES = "executables"
+MATCH_SCOPE_ARGUMENTS = "arguments"
+MATCH_SCOPE_CHOICES = (
+    MATCH_SCOPE_ALL,
+    MATCH_SCOPE_EXECUTABLES,
+    MATCH_SCOPE_ARGUMENTS,
+)
 
 
 @dataclass(frozen=True)
@@ -18,15 +29,42 @@ class ProcessEntry:
     comm: str
     args: str
 
+    @cached_property
+    def argv(self) -> tuple[str, ...]:
+        if not self.args:
+            return ()
+        try:
+            return tuple(shlex.split(self.args, posix=True))
+        except ValueError:
+            return tuple(self.args.split())
+
     @property
     def executable_name(self) -> str:
         return Path(self.comm).name
 
     @property
     def arg0_name(self) -> str:
-        if not self.args:
+        if not self.argv:
             return ""
-        return Path(self.args.split()[0]).name
+        return Path(self.argv[0]).name
+
+    @property
+    def argument_tokens(self) -> tuple[str, ...]:
+        if self.args.startswith(self.comm):
+            remainder = self.args[len(self.comm) :].strip()
+            if not remainder:
+                return ()
+            try:
+                return tuple(shlex.split(remainder, posix=True))
+            except ValueError:
+                return tuple(remainder.split())
+        if len(self.argv) <= 1:
+            return ()
+        return self.argv[1:]
+
+    @property
+    def arguments_text(self) -> str:
+        return " ".join(self.argument_tokens)
 
 
 def parse_signal(value: str) -> int:
@@ -72,19 +110,32 @@ def describe_signal(signal_number: int) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Kill processes whose name exactly matches one or more provided names."
+            "Kill processes whose executable names or arguments exactly or "
+            "partially match provided names. By default, both are searched."
         )
     )
     parser.add_argument(
         "names",
         nargs="+",
-        help="Process names to match exactly (for example: python3 node my-tool).",
+        help=(
+            "Search terms to match exactly or as substrings against executable "
+            "names and arguments."
+        ),
     )
     parser.add_argument(
         "-i",
         "--ignore-case",
         action="store_true",
         help="Match process names case-insensitively.",
+    )
+    parser.add_argument(
+        "--match-scope",
+        choices=MATCH_SCOPE_CHOICES,
+        default=MATCH_SCOPE_ALL,
+        help=(
+            "Limit where matches are searched: all (default; executable names "
+            "and arguments), executables, or arguments."
+        ),
     )
     parser.add_argument(
         "-s",
@@ -108,6 +159,29 @@ def build_parser() -> argparse.ArgumentParser:
 
 def normalize_name(name: str, ignore_case: bool) -> str:
     return name.casefold() if ignore_case else name
+
+
+def partially_matches(target: str, candidate: str) -> bool:
+    return bool(target) and target in candidate
+
+
+def has_match(
+    normalized_targets: set[str],
+    exact_candidates: set[str],
+    partial_candidates: set[str],
+) -> bool:
+    filtered_exact_candidates = {candidate for candidate in exact_candidates if candidate}
+    if normalized_targets.intersection(filtered_exact_candidates):
+        return True
+
+    filtered_partial_candidates = {
+        candidate for candidate in partial_candidates if candidate
+    }
+    return any(
+        partially_matches(target, candidate)
+        for target in normalized_targets
+        for candidate in filtered_partial_candidates
+    )
 
 
 def list_processes() -> list[ProcessEntry]:
@@ -138,21 +212,59 @@ def list_processes() -> list[ProcessEntry]:
 
 
 def find_matching_processes(
-    processes: list[ProcessEntry], names: list[str], ignore_case: bool
+    processes: list[ProcessEntry],
+    names: list[str],
+    ignore_case: bool,
+    match_scope: str = MATCH_SCOPE_ALL,
 ) -> list[ProcessEntry]:
-    normalized_targets = {normalize_name(name, ignore_case) for name in names}
+    normalized_targets: set[str] = set()
+    for name in names:
+        normalized_target = normalize_name(name, ignore_case)
+        if normalized_target:
+            normalized_targets.add(normalized_target)
     current_pid = os.getpid()
     matches: list[ProcessEntry] = []
 
     for process in processes:
         if process.pid == current_pid:
             continue
-        candidates = {
+        executable_exact_candidates = {
             normalize_name(process.comm, ignore_case),
             normalize_name(process.executable_name, ignore_case),
             normalize_name(process.arg0_name, ignore_case),
         }
-        if normalized_targets.intersection(candidates):
+        executable_partial_candidates = {
+            normalize_name(process.executable_name, ignore_case),
+            normalize_name(process.arg0_name, ignore_case),
+        }
+        argument_exact_candidates = {
+            normalize_name(argument, ignore_case)
+            for argument in process.argument_tokens
+            if argument
+        }
+        normalized_arguments_text = normalize_name(process.arguments_text, ignore_case)
+        if normalized_arguments_text:
+            argument_exact_candidates.add(normalized_arguments_text)
+        argument_partial_candidates = {normalized_arguments_text}
+
+        matches_executables = match_scope in (
+            MATCH_SCOPE_ALL,
+            MATCH_SCOPE_EXECUTABLES,
+        ) and has_match(
+            normalized_targets,
+            executable_exact_candidates,
+            executable_partial_candidates,
+        )
+        matches_arguments = match_scope in (
+            MATCH_SCOPE_ALL,
+            MATCH_SCOPE_ARGUMENTS,
+        ) and has_match(
+            normalized_targets,
+            argument_exact_candidates,
+            argument_partial_candidates,
+        )
+
+        if matches_executables or matches_arguments:
             matches.append(process)
 
     matches.sort(key=lambda item: item.pid)
@@ -213,6 +325,7 @@ def main() -> int:
         processes=processes,
         names=args.names,
         ignore_case=args.ignore_case,
+        match_scope=args.match_scope,
     )
 
     if not matches:
